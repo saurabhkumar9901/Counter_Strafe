@@ -1,0 +1,8 @@
+{
+  "tap_ms": 50,
+  "hotkey": "f8",
+  "movement_keys": ["a", "d"],
+  "swallow_hotkey": true,
+  "beep_on_toggle": false,
+  "log_path": "counter_strafe.jsonl"
+}

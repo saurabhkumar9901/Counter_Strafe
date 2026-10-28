@@ -1,0 +1,9 @@
+[project]
+name = "counter-strafe"
+version = "0.1.0"
+description = "Standalone Windows A/D counter-strafe input tap"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
