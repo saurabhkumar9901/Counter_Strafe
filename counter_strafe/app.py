@@ -83,7 +83,9 @@ class App:
         )
         self.injector = injector
         self.log = EventLog(cfg.log_path, echo=echo)
-        self.scheduler = TapScheduler(self.engine, self._inject, self._publish)
+        self.scheduler = TapScheduler(
+            self.engine, self._inject, self._publish, waiter=win32.PreciseWaiter()
+        )
         self.hook = None  # type: Optional[win32.KeyboardHook]
         self._closed = False
         self._close_lock = threading.Lock()
@@ -111,7 +113,7 @@ class App:
                 self.hook.uninstall()
             except Exception:
                 pass
-        now = time.monotonic()
+        now = time.perf_counter()
         owed = self.engine.set_armed(False, now)
         owed = tuple(owed) + tuple(self.engine.flush(now))
         if owed:
@@ -141,7 +143,7 @@ class App:
             try:
                 self.injector.send(injection)
             except Exception as exc:  # pragma: no cover - platform failure
-                self.log.write(Event(time.monotonic(), "inject_error", injection.key, str(exc)))
+                self.log.write(Event(time.perf_counter(), "inject_error", injection.key, str(exc)))
 
     def _publish(self, events: Iterable[Event]) -> None:
         events = tuple(events)

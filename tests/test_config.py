@@ -43,7 +43,8 @@ def test_overrides_beat_file(tmp_path):
     assert cfg.hotkey == "f9"
 
 
-def test_override_disables_logging():
+def test_override_disables_logging(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # do not pick up a real config.json from the repo
     cfg = config.load(None, {"log_path": None})
     assert cfg.log_path is None
     assert cfg.tap_ms == 50

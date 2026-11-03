@@ -11,6 +11,7 @@ No game is touched, no process is opened, nothing is injected into cs2.exe.
 
 import ctypes
 import sys
+import threading
 import time
 from ctypes import wintypes
 from typing import Callable, Optional
@@ -49,6 +50,12 @@ SENTINEL = 0x43534645  # "CSFE"
 
 TOKEN_QUERY = 0x0008
 TokenElevation = 20
+
+CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
+TIMER_ALL_ACCESS = 0x1F0003
+INFINITE = 0xFFFFFFFF
+WAIT_OBJECT_0 = 0x00000000
+WAIT_FAILED = 0xFFFFFFFF
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -154,6 +161,46 @@ advapi32.GetTokenInformation.argtypes = (
 )
 advapi32.GetTokenInformation.restype = wintypes.BOOL
 
+kernel32.CreateEventW.argtypes = (
+    ctypes.c_void_p,
+    wintypes.BOOL,
+    wintypes.BOOL,
+    wintypes.LPCWSTR,
+)
+kernel32.CreateEventW.restype = wintypes.HANDLE
+
+kernel32.SetEvent.argtypes = (wintypes.HANDLE,)
+kernel32.SetEvent.restype = wintypes.BOOL
+
+kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+kernel32.WaitForMultipleObjects.argtypes = (
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.HANDLE),
+    wintypes.BOOL,
+    wintypes.DWORD,
+)
+kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
+
+kernel32.CreateWaitableTimerExW.argtypes = (
+    ctypes.c_void_p,
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+)
+kernel32.CreateWaitableTimerExW.restype = wintypes.HANDLE
+
+kernel32.SetWaitableTimer.argtypes = (
+    wintypes.HANDLE,
+    ctypes.POINTER(ctypes.c_longlong),
+    wintypes.LONG,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.BOOL,
+)
+kernel32.SetWaitableTimer.restype = wintypes.BOOL
+
 
 def send_key(key: str, down: bool) -> bool:
     """Inject one scan-code keyboard event. Returns True if Windows took it."""
@@ -248,7 +295,7 @@ class KeyboardHook:
 
         repeat = False
         if injected:
-            return engine_mod.KeyEvent(kind, name, time.monotonic(), injected=True)
+            return engine_mod.KeyEvent(kind, name, time.perf_counter(), injected=True)
         if kind == engine_mod.DOWN:
             repeat = name in self._held
             self._held.add(name)
@@ -256,8 +303,74 @@ class KeyboardHook:
             self._held.discard(name)
 
         return engine_mod.KeyEvent(
-            kind, name, time.monotonic(), injected=False, repeat=repeat
+            kind, name, time.perf_counter(), injected=False, repeat=repeat
         )
+
+
+class PreciseWaiter:
+    """Wait until an absolute time.perf_counter() deadline, within ~1 ms.
+
+    threading.Condition.wait() and time.sleep() round a timeout up to the
+    system timer tick: a 50 ms wait was measured returning 1-25 ms late
+    (median +13 ms), which made every tap a different length. A waitable
+    timer created with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION wakes within
+    1 ms, and SetEvent lets a key event cut the wait short when the pending
+    deadline moves.
+
+    Handles are left open for the process lifetime: closing them could race
+    a hook callback still calling wake().
+    """
+
+    def __init__(self) -> None:
+        self._wake_event = kernel32.CreateEventW(None, False, False, None)
+        self._timer = kernel32.CreateWaitableTimerExW(
+            None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS
+        )
+        self._usable = bool(self._wake_event and self._timer)
+        self._cond = threading.Condition()
+
+    @property
+    def usable(self) -> bool:
+        return self._usable
+
+    def wake(self) -> None:
+        if self._usable:
+            kernel32.SetEvent(self._wake_event)
+        else:  # pragma: no cover - only when timer creation failed
+            with self._cond:
+                self._cond.notify_all()
+
+    def wait(self, deadline: Optional[float]) -> None:
+        if not self._usable:  # pragma: no cover - only when timer creation failed
+            with self._cond:
+                timeout = None if deadline is None else max(0.0, deadline - time.perf_counter())
+                self._cond.wait(timeout)
+            return
+
+        if deadline is None:
+            kernel32.WaitForSingleObject(self._wake_event, INFINITE)
+            return
+
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return
+            # Negative = relative, in 100 ns units.
+            due = ctypes.c_longlong(-int(remaining * 10_000_000))
+            if not kernel32.SetWaitableTimer(
+                self._timer, ctypes.byref(due), 0, None, None, False
+            ):
+                time.sleep(remaining)
+                return
+            handles = (wintypes.HANDLE * 2)(self._timer, self._wake_event)
+            result = kernel32.WaitForMultipleObjects(2, handles, False, INFINITE)
+            if result != WAIT_OBJECT_0:
+                # Woken early (deadline may have moved) or the wait failed.
+                # The caller re-reads the deadline either way.
+                if result == WAIT_FAILED:  # pragma: no cover - defensive
+                    self._usable = False
+                    time.sleep(remaining)
+                return
 
 
 def is_elevated() -> bool:
