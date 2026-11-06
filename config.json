@@ -7,5 +7,10 @@
   ],
   "swallow_hotkey": true,
   "beep_on_toggle": false,
-  "log_path": "counter_strafe.jsonl"
+  "log_path": "counter_strafe.jsonl",
+  "mouse_enabled": true,
+  "mouse_tap_threshold_ms": 200,
+  "mouse_burst_threshold_ms": 1500,
+  "mouse_burst_count": 10,
+  "mouse_burst_interval_ms": 100
 }

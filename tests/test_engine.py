@@ -225,3 +225,91 @@ def test_invalid_construction(kwargs):
 def test_tap_must_be_positive():
     with pytest.raises(ValueError):
         E.Engine(0.0)
+
+
+# --------------------------------------------------------------- mouse
+
+def mdown(engine, ts, injected=False):
+    return engine.handle_mouse(E.MouseEvent(E.MOUSE_DOWN, "lmb", ts, injected=injected))
+
+
+def mup(engine, ts, injected=False):
+    return engine.handle_mouse(E.MouseEvent(E.MOUSE_UP, "lmb", ts, injected=injected))
+
+
+def test_mouse_tap_fires_single_click():
+    engine = make(mouse_enabled=True)
+    assert mdown(engine, 0.0).mouse_injections == ()
+    result = mup(engine, 0.05)  # 50 ms hold < 200 ms tap threshold
+
+    assert result.mouse_injections == (
+        E.MouseInjection(E.MOUSE_DOWN, "lmb"),
+        E.MouseInjection(E.MOUSE_UP, "lmb"),
+    )
+
+
+def test_mouse_disarmed_no_fire():
+    engine = make(mouse_enabled=True, armed=False)
+    mdown(engine, 0.0)
+    result = mup(engine, 0.05)
+
+    assert result.mouse_injections == ()
+
+
+def test_mouse_injected_ignored():
+    engine = make(mouse_enabled=True, armed=True)
+    assert mdown(engine, 0.0, injected=True).mouse_injections == ()
+    assert engine._mouse_down_ts is None
+
+
+def test_mouse_hold_over_threshold_schedules_burst():
+    engine = make(
+        mouse_enabled=True,
+        mouse_tap_threshold_s=0.2,
+        mouse_burst_threshold_s=1.0,
+        mouse_burst_count=3,
+        mouse_burst_interval_s=0.1,
+    )
+    mdown(engine, 0.0)
+
+    # shot 0 due at 1.0, shot 1 at 1.1, shot 2 at 1.2
+    shots = engine.due_mouse(1.25)
+
+    assert len(shots) == 6  # 3 shots x (down + up)
+    assert all(s.button == "lmb" for s in shots)
+    assert [s.kind for s in shots] == [
+        E.MOUSE_DOWN, E.MOUSE_UP,
+        E.MOUSE_DOWN, E.MOUSE_UP,
+        E.MOUSE_DOWN, E.MOUSE_UP,
+    ]
+
+
+def test_mouse_burst_cancelled_on_release():
+    engine = make(
+        mouse_enabled=True,
+        mouse_tap_threshold_s=0.2,
+        mouse_burst_threshold_s=1.0,
+        mouse_burst_count=3,
+        mouse_burst_interval_s=0.1,
+    )
+    mdown(engine, 0.0)
+    engine.due_mouse(1.05)  # fire shot 0
+
+    mup(engine, 1.1)  # release cancels remaining shots
+
+    assert engine.due_mouse(1.5) == ()
+
+
+def test_mouse_hold_under_threshold_tap_not_burst():
+    engine = make(
+        mouse_enabled=True,
+        mouse_tap_threshold_s=0.2,
+        mouse_burst_threshold_s=2.0,
+    )
+    mdown(engine, 0.0)
+    result = mup(engine, 0.05)
+
+    assert result.mouse_injections == (
+        E.MouseInjection(E.MOUSE_DOWN, "lmb"),
+        E.MouseInjection(E.MOUSE_UP, "lmb"),
+    )

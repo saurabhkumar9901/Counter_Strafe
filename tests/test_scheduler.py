@@ -17,7 +17,7 @@ def test_scheduler_fires_key_up_without_hand_holding():
         if any(i.kind == E.UP for i in injections):
             seen.set()
 
-    scheduler = TapScheduler(engine, inject, lambda events: None)
+    scheduler = TapScheduler(engine, inject, lambda i: None, lambda events: None)
     scheduler.start()
 
     def on_key(ev):
@@ -40,7 +40,7 @@ def test_scheduler_fires_key_up_without_hand_holding():
 
 def test_scheduler_stop_is_clean():
     engine = E.Engine(0.05)
-    scheduler = TapScheduler(engine, lambda i: None, lambda e: None)
+    scheduler = TapScheduler(engine, lambda i: None, lambda m: None, lambda e: None)
     scheduler.start()
     scheduler.wake()
     scheduler.stop()
@@ -65,7 +65,7 @@ def test_precise_waiter_keeps_tap_length_within_a_few_ms():
             if injection.kind == E.UP:
                 seen.set()
 
-    scheduler = TapScheduler(engine, inject, lambda events: None, waiter=waiter)
+    scheduler = TapScheduler(engine, inject, lambda i: None, lambda events: None, waiter=waiter)
     scheduler.start()
     try:
         engine.handle(E.KeyEvent(E.DOWN, "d", time.perf_counter()))
@@ -83,3 +83,51 @@ def test_precise_waiter_keeps_tap_length_within_a_few_ms():
         assert 18.0 <= (up_sent - down_sent) * 1000.0 < 26.0
     finally:
         scheduler.stop()
+
+
+def test_scheduler_fires_mouse_burst_via_inject_mouse():
+    from counter_strafe import win32
+
+    waiter = win32.PreciseWaiter()
+    if not waiter.usable:
+        pytest.skip("high-resolution waitable timer unavailable")
+
+    engine = E.Engine(
+        0.01,
+        armed=True,
+        mouse_enabled=True,
+        mouse_tap_threshold_s=0.005,
+        mouse_burst_threshold_s=0.01,
+        mouse_burst_count=2,
+        mouse_burst_interval_s=0.01,
+    )
+    fired_mouse = []
+
+    def inject(injections):
+        pass
+
+    def inject_mouse(mouse_injections):
+        fired_mouse.extend(mouse_injections)
+
+    def publish(events):
+        pass
+
+    scheduler = TapScheduler(engine, inject, inject_mouse, publish, waiter=waiter)
+    scheduler.start()
+    try:
+        engine.handle_mouse(E.MouseEvent(E.MOUSE_DOWN, "lmb", time.perf_counter()))
+        scheduler.wake()
+
+        deadline = time.perf_counter() + 1.0
+        while len(fired_mouse) < 4 and time.perf_counter() < deadline:
+            time.sleep(0.005)
+    finally:
+        scheduler.stop()
+
+    assert len(fired_mouse) == 4
+    assert [i.kind for i in fired_mouse] == [
+        E.MOUSE_DOWN,
+        E.MOUSE_UP,
+        E.MOUSE_DOWN,
+        E.MOUSE_UP,
+    ]

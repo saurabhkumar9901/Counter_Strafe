@@ -29,6 +29,7 @@ advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 ULONG_PTR = wintypes.WPARAM
 LRESULT = ctypes.c_ssize_t
 
+INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
@@ -50,6 +51,15 @@ SENTINEL = 0x43534645  # "CSFE"
 
 TOKEN_QUERY = 0x0008
 TokenElevation = 20
+
+# Low-level mouse hook.
+WH_MOUSE_LL = 14
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+LLMHF_INJECTED = 0x00000001
+
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
 
 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
 TIMER_ALL_ACCESS = 0x1F0003
@@ -111,6 +121,26 @@ LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
 PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+user32.SendInput.restype = wintypes.UINT
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+LowLevelMouseProc = ctypes.WINFUNCTYPE(
+    LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+)
 user32.SendInput.restype = wintypes.UINT
 
 user32.SetWindowsHookExW.argtypes = (
@@ -214,17 +244,34 @@ def send_key(key: str, down: bool) -> bool:
     return sent == 1
 
 
+def send_mouse(button: str, down: bool) -> bool:
+    """Inject one synthetic mouse event. Returns True if Windows took it."""
+    if button.lower() != "lmb":
+        return False
+    flags = MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP
+    mi = MOUSEINPUT(0, 0, flags, 0, 0, SENTINEL)
+    inp = INPUT(type=INPUT_MOUSE, u=_INPUTUNION(mi=mi))
+    sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    return sent == 1
+
+
 class Injector:
     """Sends real input."""
 
     def send(self, injection: engine_mod.Injection) -> bool:
         return send_key(injection.key, injection.kind == engine_mod.DOWN)
 
+    def send_mouse(self, button: str, down: bool) -> bool:
+        return send_mouse(button, down)
+
 
 class DryRunInjector:
     """Logs intent, injects nothing (--dry-run)."""
 
     def send(self, injection: engine_mod.Injection) -> bool:
+        return True
+
+    def send_mouse(self, button: str, down: bool) -> bool:
         return True
 
 
@@ -304,6 +351,70 @@ class KeyboardHook:
 
         return engine_mod.KeyEvent(
             kind, name, time.perf_counter(), injected=False, repeat=repeat
+        )
+
+
+class MouseHook:
+    """WH_MOUSE_LL hook plus its message pump.
+
+    Same contract as KeyboardHook: install + run on the same thread, callback
+    returns quickly, injected events are never forwarded to the engine.
+    """
+
+    def __init__(self, dispatch: Callable[[engine_mod.MouseEvent], bool]) -> None:
+        self._dispatch = dispatch
+        self._proc = LowLevelMouseProc(self._on_event)
+        self._hook = None  # type: Optional[int]
+
+    def install(self) -> "MouseHook":
+        module = kernel32.GetModuleHandleW(None)
+        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._proc, module, 0)
+        if not self._hook:
+            raise OSError(ctypes.get_last_error(), "SetWindowsHookExW failed")
+        return self
+
+    def uninstall(self) -> None:
+        if self._hook:
+            user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+    def run(self) -> int:
+        msg = wintypes.MSG()
+        while True:
+            result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if result == 0:
+                return 0  # WM_QUIT
+            if result == -1:
+                raise OSError(ctypes.get_last_error(), "GetMessageW failed")
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    # ------------------------------------------------------------------ hook
+
+    def _on_event(self, ncode, wparam, lparam):
+        if ncode == HC_ACTION:
+            try:
+                ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                ev = self._translate(ms, wparam)
+                if ev is not None and self._dispatch(ev):
+                    return 1  # swallow: the game / other apps never see it
+            except Exception:
+                # Never break the hook chain or Windows drops the hook.
+                pass
+        return user32.CallNextHookEx(None, ncode, wparam, lparam)
+
+    def _translate(self, ms, wparam) -> Optional[engine_mod.MouseEvent]:
+        injected = bool(ms.flags & LLMHF_INJECTED)
+
+        if wparam == WM_LBUTTONDOWN:
+            kind = engine_mod.MOUSE_DOWN
+        elif wparam == WM_LBUTTONUP:
+            kind = engine_mod.MOUSE_UP
+        else:
+            return None
+
+        return engine_mod.MouseEvent(
+            kind, "lmb", time.perf_counter(), injected=injected
         )
 
 

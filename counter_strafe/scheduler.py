@@ -14,7 +14,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
-from .engine import Event, Injection
+from .engine import Event, Injection, MouseInjection
 
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import Engine
@@ -46,11 +46,13 @@ class TapScheduler:
         self,
         engine: "Engine",
         inject: Callable[[Sequence[Injection]], None],
+        inject_mouse: Callable[[Sequence[MouseInjection]], None],
         publish: Callable[[Sequence[Event]], None],
         waiter=None,
     ) -> None:
         self._engine = engine
         self._inject = inject
+        self._inject_mouse = inject_mouse
         self._publish = publish
         self._waiter = waiter if waiter is not None else _CoarseWaiter()
         self._stop = False
@@ -75,9 +77,14 @@ class TapScheduler:
         while True:
             if self._stop:
                 return
-            # A deadline may have moved or vanished while we were injecting and
-            # logging, so read it fresh on every pass.
-            self._waiter.wait(self._engine.next_deadline)
+            # Wake for whichever is due first: an owed key-up or a burst shot.
+            deadline = self._engine.next_deadline
+            mouse_deadline = self._engine.next_mouse_deadline
+            if mouse_deadline is not None and (
+                deadline is None or mouse_deadline < deadline
+            ):
+                deadline = mouse_deadline
+            self._waiter.wait(deadline)
             if self._stop:
                 return
             self._tick()
@@ -86,6 +93,9 @@ class TapScheduler:
         injections = self._engine.due(time.perf_counter())
         if injections:
             self._inject(injections)
+        mouse_injections = self._engine.due_mouse(time.perf_counter())
+        if mouse_injections:
+            self._inject_mouse(mouse_injections)
         events = self._engine.drain_events()
         if events:
             self._publish(events)

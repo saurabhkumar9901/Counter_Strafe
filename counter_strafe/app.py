@@ -17,6 +17,10 @@ from .engine import (
     Event,
     Injection,
     KeyEvent,
+    MOUSE_DOWN,
+    MOUSE_UP,
+    MouseEvent,
+    MouseInjection,
 )
 from .scheduler import TapScheduler
 
@@ -80,13 +84,23 @@ class App:
             tap_s=cfg.tap_ms / 1000.0,
             movement_keys=cfg.movement_keys,
             hotkey=cfg.hotkey,
+            mouse_enabled=cfg.mouse_enabled,
+            mouse_tap_threshold_s=cfg.mouse_tap_threshold_ms / 1000.0,
+            mouse_burst_threshold_s=cfg.mouse_burst_threshold_ms / 1000.0,
+            mouse_burst_count=cfg.mouse_burst_count,
+            mouse_burst_interval_s=cfg.mouse_burst_interval_ms / 1000.0,
         )
         self.injector = injector
         self.log = EventLog(cfg.log_path, echo=echo)
         self.scheduler = TapScheduler(
-            self.engine, self._inject, self._publish, waiter=win32.PreciseWaiter()
+            self.engine,
+            self._inject,
+            self._inject_mouse,
+            self._publish,
+            waiter=win32.PreciseWaiter(),
         )
         self.hook = None  # type: Optional[win32.KeyboardHook]
+        self.mouse_hook = None  # type: Optional[win32.MouseHook]
         self._closed = False
         self._close_lock = threading.Lock()
 
@@ -97,7 +111,9 @@ class App:
         try:
             self.hook = win32.KeyboardHook(self._on_key, self.cfg.swallow_hotkey)
             self.hook.install()
-            self.hook.run()
+            self.mouse_hook = win32.MouseHook(self._on_mouse)
+            self.mouse_hook.install()
+            self.hook.run()  # one message pump services both hooks on this thread
         finally:
             self.shutdown()
 
@@ -111,6 +127,11 @@ class App:
         if self.hook is not None:
             try:
                 self.hook.uninstall()
+            except Exception:
+                pass
+        if self.mouse_hook is not None:
+            try:
+                self.mouse_hook.uninstall()
             except Exception:
                 pass
         now = time.perf_counter()
@@ -144,6 +165,22 @@ class App:
                 self.injector.send(injection)
             except Exception as exc:  # pragma: no cover - platform failure
                 self.log.write(Event(time.perf_counter(), "inject_error", injection.key, str(exc)))
+
+    def _inject_mouse(self, mouse_injections: Sequence[MouseInjection]) -> None:
+        for injection in mouse_injections:
+            try:
+                self.injector.send_mouse(injection.button, injection.kind == MOUSE_DOWN)
+            except Exception as exc:  # pragma: no cover - platform failure
+                self.log.write(
+                    Event(time.perf_counter(), "inject_error", injection.button, str(exc))
+                )
+
+    def _on_mouse(self, ev: MouseEvent) -> bool:
+        result = self.engine.handle_mouse(ev)
+        if result.mouse_injections:
+            self._inject_mouse(result.mouse_injections)
+        self.scheduler.wake()
+        return False  # never swallow mouse input
 
     def _publish(self, events: Iterable[Event]) -> None:
         events = tuple(events)

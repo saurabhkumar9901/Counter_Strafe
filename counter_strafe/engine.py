@@ -18,6 +18,8 @@ from typing import Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 DOWN = "down"
 UP = "up"
+MOUSE_DOWN = "mouse_down"
+MOUSE_UP = "mouse_up"
 
 # Only keys with a defined opposite can be counter-strafed. w/s is wired in
 # already so enabling it later is a config change, not a code change.
@@ -43,6 +45,24 @@ class Injection:
 
 
 @dataclass(frozen=True)
+class MouseInjection:
+    """One synthetic mouse event the caller must send to the OS."""
+
+    kind: str
+    button: str
+
+
+@dataclass(frozen=True)
+class MouseEvent:
+    """One mouse event as reported by the platform layer."""
+
+    kind: str
+    button: str
+    ts: float
+    injected: bool = False
+
+
+@dataclass(frozen=True)
 class KeyEvent:
     """One key event as reported by the platform layer."""
 
@@ -58,6 +78,7 @@ class Result:
     """What the caller should do about a KeyEvent."""
 
     injections: Tuple[Injection, ...] = ()
+    mouse_injections: Tuple[MouseInjection, ...] = ()
     swallow: bool = False
 
 
@@ -86,6 +107,11 @@ class Engine:
         movement_keys: Sequence[str] = ("a", "d"),
         hotkey: str = "f8",
         armed: bool = False,
+        mouse_enabled: bool = False,
+        mouse_tap_threshold_s: float = 0.2,
+        mouse_burst_threshold_s: float = 2.0,
+        mouse_burst_count: int = 3,
+        mouse_burst_interval_s: float = 0.1,
     ) -> None:
         tap_s = float(tap_s)
         if tap_s <= 0:
@@ -105,6 +131,15 @@ class Engine:
         if hotkey in keys:
             raise ValueError("hotkey must not also be a movement key")
 
+        if mouse_tap_threshold_s <= 0:
+            raise ValueError("mouse_tap_threshold_s must be > 0")
+        if mouse_burst_threshold_s <= mouse_tap_threshold_s:
+            raise ValueError("mouse_burst_threshold_s must exceed mouse_tap_threshold_s")
+        if mouse_burst_count < 1:
+            raise ValueError("mouse_burst_count must be >= 1")
+        if mouse_burst_interval_s <= 0:
+            raise ValueError("mouse_burst_interval_s must be > 0")
+
         self._tap_s = tap_s
         self._keys: FrozenSet[str] = frozenset(keys)
         self._hotkey = hotkey
@@ -113,6 +148,14 @@ class Engine:
         self._pending: Dict[str, float] = {}
         self._events: List[Event] = []
         self._lock = threading.RLock()
+
+        self._mouse_enabled = bool(mouse_enabled)
+        self._mouse_tap_threshold_s = float(mouse_tap_threshold_s)
+        self._mouse_burst_threshold_s = float(mouse_burst_threshold_s)
+        self._mouse_burst_count = int(mouse_burst_count)
+        self._mouse_burst_interval_s = float(mouse_burst_interval_s)
+        self._mouse_down_ts: Optional[float] = None
+        self._mouse_shots_fired: int = 0
 
     # ------------------------------------------------------------------ state
 
@@ -137,6 +180,20 @@ class Engine:
             if not self._pending:
                 return None
             return min(self._pending.values())
+
+    @property
+    def next_mouse_deadline(self) -> Optional[float]:
+        """Earliest moment an owed mouse burst shot must be sent, or None."""
+        with self._lock:
+            if self._mouse_down_ts is None:
+                return None
+            if self._mouse_shots_fired >= self._mouse_burst_count:
+                return None
+            return (
+                self._mouse_down_ts
+                + self._mouse_burst_threshold_s
+                + self._mouse_shots_fired * self._mouse_burst_interval_s
+            )
 
     # -------------------------------------------------------------- decisions
 
@@ -169,6 +226,69 @@ class Engine:
 
             self._physical.discard(key)
             return Result(tuple(self._on_release(key, ev.ts)))
+
+    def handle_mouse(self, ev: MouseEvent) -> Result:
+        """Consume one platform mouse event."""
+        with self._lock:
+            if ev.injected or not self._mouse_enabled:
+                return Result()
+
+            button = ev.button.lower()
+            if button != "lmb":
+                return Result()
+
+            if ev.kind == MOUSE_DOWN:
+                if not self._armed:
+                    return Result()
+                self._mouse_down_ts = ev.ts
+                self._mouse_shots_fired = 0
+                return Result()
+
+            if ev.kind != MOUSE_UP:
+                return Result()
+
+            down_ts = self._mouse_down_ts
+            self._mouse_down_ts = None
+            self._mouse_shots_fired = 0
+            if down_ts is None:
+                return Result()
+
+            hold = ev.ts - down_ts
+            if hold < self._mouse_tap_threshold_s:
+                self._log(ev.ts, RELEASE, "", "mouse tap %s" % button)
+                return Result(
+                    mouse_injections=(
+                        MouseInjection(MOUSE_DOWN, button),
+                        MouseInjection(MOUSE_UP, button),
+                    )
+                )
+            return Result()
+
+    def due_mouse(self, ts: float) -> Tuple[MouseInjection, ...]:
+        """Fire burst shots whose deadline has passed while LMB is held."""
+        with self._lock:
+            if self._mouse_down_ts is None:
+                return ()
+            out: List[MouseInjection] = []
+            while self._mouse_shots_fired < self._mouse_burst_count:
+                deadline = (
+                    self._mouse_down_ts
+                    + self._mouse_burst_threshold_s
+                    + self._mouse_shots_fired * self._mouse_burst_interval_s
+                )
+                if deadline > ts:
+                    break
+                out.append(MouseInjection(MOUSE_DOWN, "lmb"))
+                out.append(MouseInjection(MOUSE_UP, "lmb"))
+                self._mouse_shots_fired += 1
+            return tuple(out)
+
+    def flush_mouse(self, ts: float) -> Tuple[MouseInjection, ...]:
+        """Cancel any pending burst on disarm/shutdown; no stuck shots."""
+        with self._lock:
+            self._mouse_down_ts = None
+            self._mouse_shots_fired = 0
+            return ()
 
     def _on_release(self, key: str, ts: float) -> List[Injection]:
         self._log(ts, RELEASE, key)

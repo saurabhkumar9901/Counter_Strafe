@@ -120,3 +120,64 @@ def test_bad_log_path(tmp_path):
     path = write_cfg(tmp_path, {"log_path": ""})
     with pytest.raises(config.ConfigError, match="log_path"):
         config.load(path)
+
+
+def test_mouse_defaults_disabled(tmp_path):
+    path = write_cfg(tmp_path, {"tap_ms": 50})
+    cfg = config.load(path)
+
+    assert cfg.mouse_enabled is False
+    assert cfg.mouse_tap_threshold_ms == 200
+    assert cfg.mouse_burst_threshold_ms == 2000
+    assert cfg.mouse_burst_count == 3
+    assert cfg.mouse_burst_interval_ms == 100
+
+
+def test_mouse_settings_apply_from_file(tmp_path):
+    path = write_cfg(
+        tmp_path,
+        {
+            "mouse_enabled": True,
+            "mouse_tap_threshold_ms": 100,
+            "mouse_burst_threshold_ms": 1500,
+            "mouse_burst_count": 5,
+            "mouse_burst_interval_ms": 80,
+        },
+    )
+    cfg = config.load(path)
+
+    assert cfg.mouse_enabled is True
+    assert cfg.mouse_tap_threshold_ms == 100
+    assert cfg.mouse_burst_threshold_ms == 1500
+    assert cfg.mouse_burst_count == 5
+    assert cfg.mouse_burst_interval_ms == 80
+
+
+def test_mouse_burst_threshold_must_exceed_tap_threshold(tmp_path):
+    path = write_cfg(
+        tmp_path,
+        {
+            "mouse_tap_threshold_ms": 500,
+            "mouse_burst_threshold_ms": 500,
+        },
+    )
+    with pytest.raises(config.ConfigError, match="exceed"):
+        config.load(path)
+
+
+def test_mouse_bad_bool(tmp_path):
+    path = write_cfg(tmp_path, {"mouse_enabled": "yes"})
+    with pytest.raises(config.ConfigError, match="mouse_enabled"):
+        config.load(path)
+
+
+def test_mouse_bad_thresholds(tmp_path):
+    for key in (
+        "mouse_tap_threshold_ms",
+        "mouse_burst_threshold_ms",
+        "mouse_burst_count",
+        "mouse_burst_interval_ms",
+    ):
+        path = write_cfg(tmp_path, {key: "50"})
+        with pytest.raises(config.ConfigError, match="integer"):
+            config.load(path)

@@ -16,6 +16,11 @@ DEFAULTS: Dict[str, Any] = {
     "swallow_hotkey": True,
     "beep_on_toggle": False,
     "log_path": "counter_strafe.jsonl",
+    "mouse_enabled": False,
+    "mouse_tap_threshold_ms": 200,
+    "mouse_burst_threshold_ms": 2000,
+    "mouse_burst_count": 3,
+    "mouse_burst_interval_ms": 100,
 }
 
 TAP_MS_MIN = 5
@@ -37,6 +42,11 @@ class Config:
     swallow_hotkey: bool
     beep_on_toggle: bool
     log_path: Optional[str]
+    mouse_enabled: bool
+    mouse_tap_threshold_ms: int
+    mouse_burst_threshold_ms: int
+    mouse_burst_count: int
+    mouse_burst_interval_ms: int
 
 
 def load(path: Optional[str] = None, overrides: Optional[Mapping[str, Any]] = None) -> Config:
@@ -110,9 +120,33 @@ def _validate(data: Mapping[str, Any]) -> Config:
     if hotkey in keys:
         raise ConfigError("hotkey %r must not also be a movement key" % hotkey)
 
-    for flag in ("swallow_hotkey", "beep_on_toggle"):
+    for flag in ("swallow_hotkey", "beep_on_toggle", "mouse_enabled"):
         if not isinstance(data[flag], bool):
             raise ConfigError("%s must be true or false" % flag)
+
+    def _ms_int(name: str) -> int:
+        value = data[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError("%s must be an integer number of milliseconds" % name)
+        return value
+
+    mouse_tap_threshold_ms = _ms_int("mouse_tap_threshold_ms")
+    if mouse_tap_threshold_ms < 1:
+        raise ConfigError("mouse_tap_threshold_ms must be >= 1")
+
+    mouse_burst_threshold_ms = _ms_int("mouse_burst_threshold_ms")
+    if mouse_burst_threshold_ms <= mouse_tap_threshold_ms:
+        raise ConfigError(
+            "mouse_burst_threshold_ms must exceed mouse_tap_threshold_ms"
+        )
+
+    mouse_burst_count = _ms_int("mouse_burst_count")
+    if mouse_burst_count < 1:
+        raise ConfigError("mouse_burst_count must be >= 1")
+
+    mouse_burst_interval_ms = _ms_int("mouse_burst_interval_ms")
+    if mouse_burst_interval_ms < 1:
+        raise ConfigError("mouse_burst_interval_ms must be >= 1")
 
     log_path = data["log_path"]
     if log_path is not None and (not isinstance(log_path, str) or not log_path):
@@ -125,4 +159,9 @@ def _validate(data: Mapping[str, Any]) -> Config:
         swallow_hotkey=data["swallow_hotkey"],
         beep_on_toggle=data["beep_on_toggle"],
         log_path=log_path,
+        mouse_enabled=data["mouse_enabled"],
+        mouse_tap_threshold_ms=mouse_tap_threshold_ms,
+        mouse_burst_threshold_ms=mouse_burst_threshold_ms,
+        mouse_burst_count=mouse_burst_count,
+        mouse_burst_interval_ms=mouse_burst_interval_ms,
     )
